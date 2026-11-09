@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Finance Dashboard
+Comment=World clocks, Google Calendar, forex, commodities and public IP
+Type=Application
+Exec=cosmic-applet-finance-dashboard
+Terminal=false
+Categories=COSMIC;Office;Finance;
+Keywords=COSMIC;Applet;Trading;Clock;Calendar;Forex;
+Icon=com.system76.CosmicAppletTime-symbolic
+NoDisplay=true
+X-CosmicApplet=true
+X-CosmicShrinkable=true
+X-HostWaylandDisplay=true

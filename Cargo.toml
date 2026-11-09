@@ -1,0 +1,53 @@
+[package]
+name = "cosmic-applet-finance-dashboard"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "GPL-3.0-only"
+description = "A native COSMIC trading-day dashboard"
+repository = "https://github.com/JoeyTong/cosmic-applet-finance-dashboard"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+dirs = "6"
+futures = "0.3"
+icu = { version = "2.1.1", features = ["compiled_data"] }
+jiff = "0.2"
+libcosmic = { git = "https://github.com/pop-os/libcosmic//", rev = "430f3d48a97d8779f9c1985473912e594ccca1ae", default-features = false, features = ["applet", "dbus-config", "tokio", "wayland", "xdg-portal"] }
+rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
+ron = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "process", "sync", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+
+[patch."https://github.com/smithay/client-toolkit.git"]
+sctk = { package = "smithay-client-toolkit", version = "0.20.0" }
+
+# Match the native COSMIC 1.11 dependency revisions, rather than moving upstream HEADs.
+[patch."https://github.com/pop-os/libcosmic"]
+cosmic-config = { git = "https://github.com/pop-os/libcosmic//", rev = "430f3d48a97d8779f9c1985473912e594ccca1ae" }
+
+[patch."https://github.com/pop-os/dbus-settings-bindings"]
+cosmic-settings-daemon = { git = "https://github.com/pop-os/dbus-settings-bindings//", rev = "eed01dd3609e90e3c8cd043656734c500956c793" }
+
+[patch."https://github.com/pop-os/cosmic-panel"]
+cosmic-panel-config = { git = "https://github.com/pop-os/cosmic-panel//", rev = "3ce6ce1cec97669f91e809962d9446aaefe8a06e" }
+
+[patch."https://github.com/pop-os/freedesktop-icons"]
+cosmic-freedesktop-icons = { git = "https://github.com/pop-os/freedesktop-icons//", rev = "ab4c57b8e416c6af9297cb04d101889896fd9a92" }
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true

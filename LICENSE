@@ -1,0 +1,13 @@
+SPDX-License-Identifier: GPL-3.0-only
+
+Finance Dashboard COSMIC Applet is licensed under the GNU General Public License,
+version 3 only. You may redistribute and modify this program under the terms
+of that license. It is distributed without any warranty, including the implied
+warranties of merchantability or fitness for a particular purpose.
+
+The full license text is available at:
+https://www.gnu.org/licenses/gpl-3.0.txt
+
+Panel clock formatting and configuration defaults include adaptations of:
+Copyright 2023 System76 <info@system76.com>
+cosmic-applet-time and cosmic-applets-config, GPL-3.0-only.
