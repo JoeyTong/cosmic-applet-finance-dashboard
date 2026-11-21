@@ -11,6 +11,7 @@ install -d "$prefix/bin" "$prefix/share/applications" "$prefix/share/licenses/co
 install -m 755 "$root/target/release/cosmic-applet-finance-dashboard" "$prefix/bin/cosmic-applet-finance-dashboard.new"
 mv -f "$prefix/bin/cosmic-applet-finance-dashboard.new" "$prefix/bin/cosmic-applet-finance-dashboard"
 install -m 644 "$root/data/flags/LICENSE" "$prefix/share/licenses/cosmic-applet-finance-dashboard/flag-icons-LICENSE"
+install -m 644 "$root/data/japanese/WORDS.md" "$prefix/share/licenses/cosmic-applet-finance-dashboard/japanese-words-WORDS.md"
 rm -f "$prefix/bin/daily-work-cosmic-applet" \
     "$prefix/share/applications/io.github.dailywork.CosmicApplet.desktop" \
     "$prefix/share/applications/io.github.cosmic_finance_dashboard.Applet.desktop" \

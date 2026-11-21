@@ -41,6 +41,8 @@ changing behavior. Update both documents after relevant user-approved changes.
 | `src/oauth.rs` | Desktop OAuth, PKCE/state, loopback callback, keyring, browser launch |
 | `src/market.rs` | TradingView instrument mapping, parsing, precision and quote status |
 | `src/network.rs` | HTTP client, time synchronization and public IP |
+| `src/japanese/` | Daily word queue, bundled catalog, Jisho and Wiktionary lookup, British spelling, idle detection, progress and detail cache |
+| `data/japanese/` | Embedded word list and CC BY-SA attribution |
 | `data/*.desktop`, `scripts/` | Per-user installation, panel integration and removal |
 
 ## User-approved behavior
@@ -50,11 +52,26 @@ changing behavior. Update both documents after relevant user-approved changes.
 - Panel date/time comes directly from the OS and matches the stock COSMIC
   Date, Time & Calendar applet's formatting, locale, size and orientation.
   Read its existing `com.system76.CosmicAppletTime` configuration.
-- The dashboard is currently **1600×940**, with no dashboard scrolling:
-  clocks upper left; large public IP and country flag upper right;
-  two-week calendar lower left; forex and commodities lower right.
-- Additional items shrink to fit; large watchlists can use multiple columns.
-  The user selected this over pagination. Settings may still scroll.
+- The dashboard has no fixed size and no dashboard scrolling. It hugs the
+  clocks, forex pairs, and calendar events at the readability floor: clock
+  faces about 100px, centered in the clock card, forex rows about 32px, and the
+  current text sizes. The public IP and forex column is only as wide as the
+  flags, the longest pair or commodity label, the price, and the daily change.
+  The top row is only as tall as the clocks; the public IP card uses that
+  height. A shorter calendar grows to meet the markets card, and shorter
+  quote rows and commodity tiles grow to meet the Japanese card.
+  One clock row and one forex column are used until another row would pass
+  the monitor; then a new row or column is added. If the content still does
+  not fit, those items shrink until it does. The monitor size is read at
+  startup and when the compositor reports a new output. If the panel is not
+  on one named output, the smaller connected output is the limit.
+  Clocks are upper left. Public IP is upper right and shares the markets
+  column width. The two-week calendar is lower left. Forex and both
+  commodities are lower right. Each calendar day box is at least three times
+  the previous date-only height, and grows further when that day has more
+  events. The Japanese card is under the calendar and
+  stays bottom-aligned with commodities. Settings uses that same window and
+  scrolls inside it.
 - The dashboard popup has no title. The panel and desktop-entry name is
   Finance Dashboard.
 - The centered, text-only banner initially reads **“Thrived Today, Leading
@@ -95,6 +112,7 @@ changing behavior. Update both documents after relevant user-approved changes.
 | Forex | Configurable pairs; fetch at startup and every 10 minutes. Show flags, symbol, description, price, signed daily absolute and percentage change. |
 | Commodities | Fetch at startup and every 10 minutes; retain exact instrument meanings below. |
 | Public IP | Fetch at startup and every minute; show egress IP, country, city and prominent flag. |
+| Japanese | One word per local day for the selected library. No countdown. See the vocabulary section below. |
 
 - Default clocks: Singapore (`Asia/Singapore`), GMT (`Etc/UTC`), New York
   (`America/New_York`, including DST), Tokyo (`Asia/Tokyo`). “GTM” was clarified
@@ -111,6 +129,42 @@ changing behavior. Update both documents after relevant user-approved changes.
   smaller final fractional digits where applicable, and red/green daily changes.
 - `BRN1` means `ICEEUR:BRN1!`: front-month continuous ICE Brent futures,
   USD/barrel. `GOLD` means `TVC:GOLD`: spot XAU/USD, USD/troy ounce, not gold futures.
+
+### Japanese vocabulary
+
+- The card under the calendar has two centered lines. The first line shows the
+  headword and reading at 45px. The second line shows the pronunciation and the
+  British English gloss. Hovering shows the pronunciation source, each sense
+  under its part of speech, and each example with the Japanese sentence above
+  the English. No JLPT label, section title, separate Settings button, or
+  countdown. **Next Word** is at the right of the card. The card's bottom lines
+  up with the commodities card.
+- Pronunciation on the main line is broad Tokyo IPA in slashes. Long vowels
+  and small-tsu consonants use ː. The voiced velar stop is ɡ. Pitch accent and
+  narrow vowel marks are removed, and Wiktionary text is normalized to this
+  style. Senses and examples come from Jisho and English Wiktionary.
+  Generated kana pronunciation is labeled. Do not invent examples.
+- One automatic word per local date for the library currently selected. Several
+  missed midnights still take one step, on the next launch or while the applet
+  is running. The same word survives restarts that happen on the same local date.
+- The step marks the word learned only after 30 minutes of active session time
+  on that word. Active time pauses when logind reports idle, locked, or a
+  non-active session. If the probe fails, time still counts. Below 30 minutes,
+  the word is replaced and stays unlearned. **Next Word** marks it learned immediately
+  and does not affect other libraries. Dashboard Refresh does not change the word.
+- A library that is not selected does not accumulate time and does not rotate
+  until it is selected. Each library has its own word, learned set, and day.
+- Reset asks for confirmation and clears only the selected library. A completed
+  library shows a completion line and does not rotate.
+- Progress is stored in `$XDG_DATA_HOME/cosmic-applet-finance-dashboard/japanese-study.json`.
+  Dictionary details are cached in `japanese-details.json` in the same directory.
+  Do not import the Japanese Words applet's files. Leave that applet in place.
+- The bundled gloss is shown with dictionary senses in British spelling.
+  Jisho is the primary source for senses. Wiktionary supplies examples,
+  backup senses, and dictionary pronunciation.
+- Moved study sources keep their MPL-2.0 headers. `data/japanese/words.json`
+  stays CC BY-SA 4.0. The dashboard package stays GPL-3.0-only.
+
 - Free public snapshots were approved. Show delays, stale/last-known data,
   unavailable instruments and sources honestly. Bar timestamps are not trade
   timestamps; daily change is not change since the previous app refresh.
@@ -230,6 +284,7 @@ storage. Check their values on the destination.
 | Stock clock preferences | `$XDG_CONFIG_HOME/cosmic/com.system76.CosmicAppletTime/v1/`. By default follow the destination's clock/week preferences. |
 | Panel placement/backups | COSMIC panel configuration; helper backups in the app config directory under `panel-backups/`. Recreate placement on the destination rather than overwriting its entire panel config. |
 | Login marker | `$XDG_RUNTIME_DIR/cosmic-applet-finance-dashboard/login-*.shown`. Ephemeral; do not transfer. New logins create their own markers. |
+| Japanese progress | `$XDG_DATA_HOME/cosmic-applet-finance-dashboard/japanese-study.json`, with dictionary details in `japanese-details.json` beside it. Transfer only to keep this dashboard's own vocabulary progress. Do not copy the Japanese Words applet's study file into it. |
 | OpenCode history | Normally `~/.local/share/opencode/opencode.db`, separate from this project. Move session associations after directory changes; use OpenCode session export/import when transferring history to another computer. This guide supplies portable context, not a conversation-history export. |
 
 Settings writes use a private directory and atomic replacement. Keep that behavior

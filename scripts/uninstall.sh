@@ -9,6 +9,7 @@ rm -f "$prefix/bin/cosmic-applet-finance-dashboard" \
     "$prefix/share/applications/io.github.cosmic_finance_dashboard.Applet.desktop" \
     "$prefix/share/applications/io.github.dailywork.CosmicApplet.desktop" \
     "$prefix/share/licenses/cosmic-applet-finance-dashboard/flag-icons-LICENSE" \
+    "$prefix/share/licenses/cosmic-applet-finance-dashboard/japanese-words-WORDS.md" \
     "$prefix/share/licenses/daily-work-cosmic-applet/flag-icons-LICENSE"
 rmdir "$prefix/share/licenses/cosmic-applet-finance-dashboard" 2>/dev/null || true
 rmdir "$prefix/share/licenses/daily-work-cosmic-applet" 2>/dev/null || true

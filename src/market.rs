@@ -121,6 +121,19 @@ impl Quote {
     }
 }
 
+pub fn pair_description(symbol: &str) -> String {
+    match symbol {
+        "BRN1" => "Brent crude \u{b7} Front-month futures \u{b7} USD/barrel".to_owned(),
+        "GOLD" => "Spot gold \u{b7} XAU/USD \u{b7} USD/troy ounce".to_owned(),
+        _ if symbol.len() == 6 && symbol.is_ascii() => {
+            let (base, _) = currency(&symbol[..3]);
+            let (quote, _) = currency(&symbol[3..]);
+            format!("{base} / {quote}")
+        }
+        _ => symbol.to_owned(),
+    }
+}
+
 pub fn currency(code: &str) -> (&str, &str) {
     match code {
         "USD" => ("US Dollar", "US"),

@@ -1,9 +1,10 @@
+use catalog::Library;
 use chrono::{DateTime, Datelike, Local, NaiveDate, Timelike, Utc, Weekday};
 use cosmic::{
     Element, Task, app,
     cctk::wayland_client::protocol::wl_output::WlOutput,
     iced::{
-        self, Alignment, Color, Length, Rectangle, Subscription,
+        self, Alignment, Border, Color, Length, Rectangle, Subscription,
         advanced::layout::Limits,
         event::{
             PlatformSpecific,
@@ -27,22 +28,25 @@ use cosmic::{
 use cosmic_applet_finance_dashboard::{
     calendar::{self, CalendarEvent, CalendarSnapshot},
     config::{self, Clock, PanelClock, Settings},
+    dashboard_layout,
+    japanese::{self, catalog, study},
     login,
     market::{self, MarketSnapshot, Quote},
     network::{self, PublicIp, TimeSync},
     oauth,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     sync::LazyLock,
     time::{Duration, Instant},
 };
+use study::Cycle;
 
-pub const WIDTH: f32 = 1600.0;
-pub const HEIGHT: f32 = 940.0;
 static PANEL_AUTOSIZE: LazyLock<widget::Id> =
     LazyLock::new(|| widget::Id::new("finance-dashboard-panel"));
+static PREVIEW_AUTOSIZE: LazyLock<widget::Id> =
+    LazyLock::new(|| widget::Id::new("finance-dashboard-preview"));
 static BODY_SCROLL: LazyLock<widget::Id> =
     LazyLock::new(|| widget::Id::new("finance-dashboard-body"));
 static CLOCK_EDIT_LABEL: LazyLock<widget::Id> =
@@ -52,7 +56,7 @@ static CLOCK_EDIT_LABEL: LazyLock<widget::Id> =
 pub enum Message {
     Tick,
     SurfacePressed(window::Id),
-    Output(WlOutput, String),
+    Output(WlOutput, String, u32, u32),
     OutputRemoved(WlOutput),
     TogglePopup,
     Close,
@@ -92,6 +96,21 @@ pub enum Message {
     Open(String),
     Opened(Result<(), String>),
     ClearNotice,
+    JapaneseNext,
+    JapaneseLibrary(Library),
+    JapaneseAskReset,
+    JapaneseCancelReset,
+    JapaneseConfirmReset,
+    JapaneseProbe,
+    JapaneseSession(Result<bool, String>),
+    JapaneseFetched(String, Box<japanese::details::Lookup>),
+}
+
+struct KnownOutput {
+    output: WlOutput,
+    name: String,
+    width: u32,
+    height: u32,
 }
 
 struct ClockEdit {
@@ -105,7 +124,7 @@ pub struct FinanceDashboard {
     preview: bool,
     popup: Option<window::Id>,
     backdrop: Option<window::Id>,
-    outputs: Vec<(WlOutput, String)>,
+    outputs: Vec<KnownOutput>,
     login_popup_pending: bool,
     rectangle: Rectangle,
     rectangle_tracker: Option<RectangleTracker<u32>>,
@@ -149,6 +168,16 @@ pub struct FinanceDashboard {
     auth_busy: bool,
     choosing_client: bool,
     notice: Option<String>,
+    japanese_library: Library,
+    japanese_cycles: BTreeMap<Library, Cycle>,
+    japanese_session_active: bool,
+    japanese_probing: bool,
+    japanese_idle_warned: bool,
+    japanese_confirm_reset: bool,
+    japanese_cache: BTreeMap<String, japanese::details::Detail>,
+    japanese_live: BTreeMap<String, japanese::details::Detail>,
+    japanese_inflight: BTreeSet<String>,
+    japanese_failed: BTreeSet<String>,
 }
 
 fn job<T: Send + 'static>(
@@ -165,6 +194,26 @@ fn due(last: Option<Instant>, seconds: u64) -> bool {
     last.is_none_or(|instant| instant.elapsed() >= Duration::from_secs(seconds))
 }
 
+fn logical_pixels(info: &cosmic::cctk::sctk::output::OutputInfo) -> (u32, u32) {
+    if let Some((width, height)) = info.logical_size
+        && width > 0
+        && height > 0
+    {
+        return (width as u32, height as u32);
+    }
+    let scale = info.scale_factor.max(1);
+    info.modes
+        .iter()
+        .find(|mode| mode.current)
+        .map(|mode| {
+            (
+                (mode.dimensions.0 / scale).max(0) as u32,
+                (mode.dimensions.1 / scale).max(0) as u32,
+            )
+        })
+        .unwrap_or((0, 0))
+}
+
 fn input_event(event: iced::Event, _: iced::event::Status, id: window::Id) -> Option<Message> {
     // Popup lifetime follows explicit clicks and dismissal, not pointer motion
     // or keyboard focus (including COSMIC's focus-follows-cursor).
@@ -177,7 +226,15 @@ fn input_event(event: iced::Event, _: iced::event::Status, id: window::Id) -> Op
             WaylandEvent::Output(
                 OutputEvent::Created(Some(info)) | OutputEvent::InfoUpdate(info),
                 output,
-            ) => Some(Message::Output(output, info.name.unwrap_or_default())),
+            ) => {
+                let (width, height) = logical_pixels(&info);
+                Some(Message::Output(
+                    output,
+                    info.name.unwrap_or_default(),
+                    width,
+                    height,
+                ))
+            }
             WaylandEvent::Output(OutputEvent::Removed, output) => {
                 Some(Message::OutputRemoved(output))
             }
@@ -271,10 +328,18 @@ impl FinanceDashboard {
         let open = cosmic::surface::surface_task(cosmic::surface::action::app_popup(
             |_| Default::default(),
             move |app: &mut Self| {
+                let frame = app.dashboard_frame();
+                let screen = app.usable_screen();
+                let width = (frame.content_width + 28.0)
+                    .round()
+                    .clamp(360.0, screen.width);
+                let height = (frame.overview_height + 160.0)
+                    .round()
+                    .clamp(240.0, screen.height);
                 let mut settings = app.core.applet.get_popup_settings(
                     app.core.main_window_id().unwrap(),
                     id,
-                    Some((WIDTH as u32, HEIGHT as u32)),
+                    Some((width as u32, height as u32)),
                     None,
                     None,
                 );
@@ -288,10 +353,10 @@ impl FinanceDashboard {
                     height: app.rectangle.height.max(1.0) as i32,
                 };
                 settings.positioner.size_limits = Limits::NONE
-                    .min_width(480.0)
-                    .max_width(WIDTH)
-                    .min_height(300.0)
-                    .max_height(HEIGHT);
+                    .min_width(360.0)
+                    .max_width(screen.width)
+                    .min_height(240.0)
+                    .max_height(screen.height);
                 settings
             },
             None,
@@ -308,10 +373,10 @@ impl FinanceDashboard {
         let output = self
             .outputs
             .iter()
-            .find(|(_, name)| *name == self.core.applet.output_name)
+            .find(|known| known.name == self.core.applet.output_name)
             .or_else(|| (self.outputs.len() == 1).then(|| &self.outputs[0]))
-            .map_or(IcedOutput::Active, |(output, _)| {
-                IcedOutput::Output(output.clone())
+            .map_or(IcedOutput::Active, |known| {
+                IcedOutput::Output(known.output.clone())
             });
         cosmic::surface::surface_task(cosmic::surface::action::app_layer_shell(
             |_| cosmic::surface::action::LiveSettings {
@@ -382,6 +447,120 @@ impl FinanceDashboard {
         Task::batch(tasks)
     }
 
+    fn usable_screen(&self) -> dashboard_layout::Budget {
+        let panel = if self.core.applet.is_horizontal() {
+            self.rectangle.height
+        } else {
+            self.rectangle.width
+        };
+        let reserve_h = if panel > 1.0 { panel + 20.0 } else { 72.0 };
+        let known: Vec<_> = self
+            .outputs
+            .iter()
+            .filter(|output| output.width > 0 && output.height > 0)
+            .collect();
+        let chosen = known
+            .iter()
+            .copied()
+            .find(|output| output.name == self.core.applet.output_name)
+            .or_else(|| (known.len() == 1).then(|| known[0]))
+            .or_else(|| {
+                known
+                    .iter()
+                    .copied()
+                    .min_by_key(|output| u64::from(output.width) * u64::from(output.height))
+            });
+        match chosen {
+            Some(output) => dashboard_layout::Budget {
+                width: (output.width as f32 - 24.0).max(640.0),
+                height: (output.height as f32 - reserve_h).max(480.0),
+            },
+            None => dashboard_layout::Budget {
+                width: 1600.0,
+                height: 1000.0,
+            },
+        }
+    }
+
+    fn content_budget(&self) -> dashboard_layout::Budget {
+        let screen = self.usable_screen();
+        let vertical = 132.0 + if self.notice.is_some() { 48.0 } else { 0.0 };
+        dashboard_layout::Budget {
+            width: (screen.width - 36.0).max(480.0),
+            height: (screen.height - vertical).max(320.0),
+        }
+    }
+
+    fn dashboard_load(&self) -> dashboard_layout::Load {
+        let start = calendar::week_start(
+            Local::now().date_naive(),
+            self.panel_config.first_day_of_week,
+        );
+        let mut week_events = [0, 0];
+        for (week, peak) in week_events.iter_mut().enumerate() {
+            for weekday in 0..7 {
+                let day = start + chrono::Duration::days((week * 7 + weekday) as i64);
+                let count = self
+                    .calendar
+                    .events
+                    .iter()
+                    .filter(|event| {
+                        event.on_day(day)
+                            && !self
+                                .settings
+                                .disabled_calendars
+                                .contains(&event.calendar_id)
+                    })
+                    .count();
+                *peak = (*peak).max(count);
+            }
+        }
+        let agenda_events = self
+            .calendar
+            .events
+            .iter()
+            .filter(|event| {
+                event.on_day(self.selected_day)
+                    && !self
+                        .settings
+                        .disabled_calendars
+                        .contains(&event.calendar_id)
+            })
+            .count();
+        let connected = !self.settings.google_email.is_empty();
+        let legend_rows = if connected {
+            self.calendar
+                .calendars
+                .iter()
+                .filter(|source| !self.settings.disabled_calendars.contains(&source.id))
+                .count()
+                .div_ceil(3)
+        } else {
+            0
+        };
+        let mut description_chars = "Brent front month \u{b7} USD/barrel".chars().count();
+        description_chars =
+            description_chars.max("Spot gold \u{b7} USD/troy ounce".chars().count());
+        for pair in &self.settings.forex {
+            description_chars =
+                description_chars.max(market::pair_description(pair).chars().count());
+        }
+        dashboard_layout::Load {
+            clocks: self.settings.clocks.len(),
+            forex: self.settings.forex.len(),
+            description_chars,
+            week_events,
+            agenda_events,
+            legend_rows,
+            market_error: self.market_error.is_some(),
+            show_calendar_prompt: !connected,
+        }
+    }
+
+    fn dashboard_frame(&self) -> dashboard_layout::Frame {
+        dashboard_layout::measure(&self.dashboard_load(), self.content_budget())
+    }
+
     fn header(&self) -> Element<'_, Message> {
         let mut controls = row![].align_y(Alignment::Center).spacing(8);
         if self.settings_open {
@@ -390,7 +569,7 @@ impl FinanceDashboard {
         } else {
             controls = controls.push(tooltip(
                 button::icon(icon::from_name("view-refresh-symbolic")).on_press(Message::Refresh),
-                text("Refresh all modules"),
+                text("Refresh clocks, calendar, markets, and public IP"),
                 tooltip::Position::Bottom,
             ));
             controls = controls.push(tooltip(
@@ -422,7 +601,12 @@ impl FinanceDashboard {
     }
 
     fn dashboard(&self) -> Element<'_, Message> {
-        let mut content = column![self.header(), divider::horizontal::default()].spacing(0);
+        let frame = self.dashboard_frame();
+        let body_width = frame.content_width + 28.0;
+        let body_height = frame.overview_height + 28.0;
+        let mut content = column![self.header(), divider::horizontal::default()]
+            .spacing(0)
+            .width(body_width);
         if let Some(notice) = &self.notice {
             content = content.push(
                 container(
@@ -434,6 +618,7 @@ impl FinanceDashboard {
                     .spacing(8),
                 )
                 .padding([8, 16])
+                .width(Length::Fill)
                 .class(cosmic::theme::Container::Card),
             );
         }
@@ -444,66 +629,75 @@ impl FinanceDashboard {
                     .width(Length::Fill),
             )
             .id(BODY_SCROLL.clone())
-            .height(Length::Fill)
+            .width(body_width)
+            .height(body_height)
             .into()
         } else {
             container(self.overview())
                 .padding(14)
-                .width(Length::Fill)
-                .height(Length::Fill)
+                .width(body_width)
+                .height(body_height)
                 .into()
         };
         content = content.push(body);
         container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
+            .width(body_width)
+            .height(Length::Shrink)
             .into()
     }
 
     fn overview(&self) -> Element<'_, Message> {
-        widget::responsive(move |size| {
-            let gap = 14.0;
-            let top_height = (size.height * 0.245).clamp(80.0, 208.0);
-            let lower_height = (size.height - top_height - gap).max(80.0);
-            let available_width = (size.width - gap).max(1.0);
-            let top = row![
-                container(self.clocks_view(available_width * 0.64 - 24.0, top_height - 24.0))
+        let frame = self.dashboard_frame();
+        let gap = dashboard_layout::GAP;
+        let top = row![
+            container(self.clocks_view(&frame))
+                .padding(12)
+                .width(frame.left_width)
+                .height(frame.top_height)
+                .class(cosmic::theme::Container::Card),
+            container(self.ip_view((frame.top_height - 24.0).max(1.0)))
+                .padding(12)
+                .width(frame.right_width)
+                .height(frame.top_height)
+                .class(cosmic::theme::Container::Card),
+        ]
+        .spacing(gap)
+        .width(frame.content_width)
+        .height(frame.top_height);
+        let lower = row![
+            column![
+                container(self.calendar_view(&frame))
                     .padding(12)
-                    .width(Length::FillPortion(16))
-                    .height(Length::Fill)
+                    .width(frame.left_width)
+                    .height(frame.calendar_height)
                     .class(cosmic::theme::Container::Card),
-                container(self.ip_view(top_height - 24.0))
-                    .padding(12)
-                    .width(Length::FillPortion(9))
-                    .height(Length::Fill)
+                widget::space::vertical().height(gap),
+                container(self.vocabulary_view(frame.scale))
+                    .padding([4, 12])
+                    .width(frame.left_width)
+                    .height(frame.word_height)
                     .class(cosmic::theme::Container::Card),
             ]
+            .spacing(0)
+            .width(frame.left_width)
+            .height(frame.lower_height),
+            container(self.markets_view(&frame))
+                .padding(12)
+                .width(frame.right_width)
+                .height(frame.lower_height)
+                .class(cosmic::theme::Container::Card),
+        ]
+        .spacing(gap)
+        .width(frame.content_width)
+        .height(frame.lower_height);
+        column![top, lower]
             .spacing(gap)
-            .height(top_height);
-            let lower = row![
-                container(self.calendar_view(available_width * 0.52 - 24.0, lower_height - 24.0))
-                    .padding(12)
-                    .width(Length::FillPortion(13))
-                    .height(Length::Fill)
-                    .class(cosmic::theme::Container::Card),
-                container(self.markets_view(available_width * 0.48 - 24.0, lower_height - 24.0))
-                    .padding(12)
-                    .width(Length::FillPortion(12))
-                    .height(Length::Fill)
-                    .class(cosmic::theme::Container::Card),
-            ]
-            .spacing(gap)
-            .height(lower_height);
-            column![top, lower]
-                .spacing(gap)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
-        })
-        .into()
+            .width(frame.content_width)
+            .height(frame.overview_height)
+            .into()
     }
 
-    fn clocks_view(&self, width: f32, height: f32) -> Element<'_, Message> {
+    fn clocks_view(&self, frame: &dashboard_layout::Frame) -> Element<'_, Message> {
         let status = if let Some(error) = &self.time_error {
             error.clone()
         } else if let Some(sync) = &self.time {
@@ -528,16 +722,10 @@ impl FinanceDashboard {
             .align_y(Alignment::Center)
         ]
         .spacing(4);
-        let columns = self.settings.clocks.len().clamp(1, 8);
-        let rows = self.settings.clocks.len().div_ceil(columns).max(1);
-        let cell_height = ((height - 48.0 - 4.0 * (rows - 1) as f32) / rows as f32).max(8.0);
-        let cell_width = ((width - 8.0 * (columns - 1) as f32) / columns as f32).max(8.0);
-        let scale = (cell_height / 142.0)
-            .min(cell_width / 160.0)
-            .clamp(0.03, 1.0);
-        let diameter = (cell_height - 31.0 * scale)
-            .min(cell_width - 4.0)
-            .clamp(4.0, 112.0);
+        let columns = frame.clock_columns.max(1);
+        let scale = frame.scale;
+        let cell_height = frame.clock_cell_height;
+        let diameter = frame.clock_face;
         for group in self.settings.clocks.chunks(columns) {
             let mut clock_row = widget::Row::new().spacing(8);
             for clock in group {
@@ -561,7 +749,7 @@ impl FinanceDashboard {
                     .align_x(Alignment::Center)
                     .spacing(2.0 * scale)
                     .height(cell_height)
-                    .width(Length::Fill);
+                    .width(frame.clock_cell_width);
                     clock_row = clock_row.push(tooltip(
                         view,
                         text(clock.timezone.clone()),
@@ -569,16 +757,20 @@ impl FinanceDashboard {
                     ));
                 }
             }
-            for _ in group.len()..columns {
-                clock_row = clock_row.push(widget::space::horizontal());
-            }
-            clocks = clocks.push(clock_row);
+            clocks = clocks.push(
+                container(clock_row)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Center),
+            );
         }
         if self.settings.clocks.is_empty() {
             clocks = clocks.push(text::caption("Add a world clock in Settings."));
         }
         clocks
-            .push(status_line(status, (width / 6.0).max(12.0) as usize))
+            .push(status_line(
+                status,
+                ((frame.left_width - 24.0) / 6.0).max(12.0) as usize,
+            ))
             .into()
     }
 
@@ -621,11 +813,11 @@ impl FinanceDashboard {
         .into()
     }
 
-    fn calendar_view(&self, width: f32, height: f32) -> Element<'_, Message> {
+    fn calendar_view(&self, frame: &dashboard_layout::Frame) -> Element<'_, Message> {
         let today = Local::now().date_naive();
         let start = calendar::week_start(today, self.panel_config.first_day_of_week);
         let end = start + chrono::Duration::days(13);
-        let cell_height = (height * 0.235).clamp(30.0, 148.0);
+        let width = (frame.left_width - 24.0).max(10.0);
         let cell_width = ((width - 30.0) / 7.0).max(10.0);
         let mut view = column![
             row![
@@ -660,10 +852,10 @@ impl FinanceDashboard {
             );
         }
         view = view.push(weekdays);
-        for week in 0..2 {
+        for week in 0..2usize {
             let mut days = widget::Row::new().spacing(5);
             for weekday in 0..7 {
-                let day = start + chrono::Duration::days(week * 7 + weekday);
+                let day = start + chrono::Duration::days((week * 7 + weekday) as i64);
                 let events: Vec<_> = self
                     .calendar
                     .events
@@ -690,8 +882,8 @@ impl FinanceDashboard {
                     })
                     .on_press(Message::SelectDay(day));
                 let mut cell = column![date_button].spacing(0).width(Length::Fill);
-                let event_height =
-                    ((cell_height - 38.0).max(1.0) / events.len().max(1) as f32).min(21.0);
+                let cell_height = frame.week_heights[week];
+                let event_height = frame.event_line;
                 for event in events {
                     cell = cell.push(self.event_chip(event, true, cell_width - 8.0, event_height));
                 }
@@ -779,11 +971,11 @@ impl FinanceDashboard {
                 container(self.agenda_view())
                     .padding(8)
                     .width(Length::Fill)
-                    .height(Length::Fill)
+                    .height(frame.agenda_height.max(1.0))
                     .class(cosmic::theme::Container::Primary),
             );
         }
-        view.height(Length::Fill).into()
+        view.into()
     }
 
     fn agenda_view(&self) -> Element<'_, Message> {
@@ -826,9 +1018,10 @@ impl FinanceDashboard {
         .into()
     }
 
-    fn quote_row<'a>(&'a self, symbol: &'a str, width: f32, height: f32) -> Element<'a, Message> {
-        let scale = (height / 40.0).min(width / 680.0).clamp(0.025, 1.0);
-        let (flags, description): (Element<'_, Message>, String) = match symbol {
+    fn quote_row<'a>(&'a self, symbol: &'a str, _width: f32, height: f32) -> Element<'a, Message> {
+        let scale = (height / 32.0).clamp(0.025, 1.0);
+        let description = market::pair_description(symbol);
+        let (flags, _label): (Element<'_, Message>, String) = match symbol {
             "BRN1" => (
                 text("◈").size(19.0 * scale).into(),
                 "Brent crude · Front-month futures · USD/barrel".into(),
@@ -853,7 +1046,7 @@ impl FinanceDashboard {
         ]
         .spacing(2.0 * scale)
         .width(Length::Fill);
-        let mut line = row![container(flags).width(44.0 * scale).center_y(height), title]
+        let mut line = row![container(flags).width(42.0 * scale).center_y(height), title]
             .align_y(Alignment::Center)
             .spacing(8.0 * scale);
         if let Some(quote) = self.quotes.get(symbol) {
@@ -921,11 +1114,11 @@ impl FinanceDashboard {
                     column![price_view, text(status).size(10.0 * scale).line_height(1.0)]
                         .align_x(Alignment::End)
                         .spacing(2.0 * scale)
-                        .width(126.0 * scale),
+                        .width(86.0 * scale),
                     container(text(details).size(12)).max_width(420),
                     tooltip::Position::Left,
                 ))
-                .push(container(change).align_right(96.0 * scale));
+                .push(container(change).align_right(76.0 * scale));
         } else {
             line = line
                 .push(
@@ -939,9 +1132,9 @@ impl FinanceDashboard {
                         .size(10.0 * scale)
                     ]
                     .align_x(Alignment::End)
-                    .width(126.0 * scale),
+                    .width(86.0 * scale),
                 )
-                .push(container(text("—").size(12.0 * scale)).align_right(96.0 * scale));
+                .push(container(text("—").size(12.0 * scale)).align_right(76.0 * scale));
         }
         container(line)
             .padding([0, 2])
@@ -950,7 +1143,8 @@ impl FinanceDashboard {
             .into()
     }
 
-    fn markets_view(&self, width: f32, height: f32) -> Element<'_, Message> {
+    fn markets_view(&self, frame: &dashboard_layout::Frame) -> Element<'_, Message> {
+        let width = (frame.right_width - 24.0).max(10.0);
         let mut view = column![
             row![
                 text::title4("Forex"),
@@ -970,22 +1164,12 @@ impl FinanceDashboard {
                 (width / 6.0).max(12.0) as usize,
             ));
         }
-        let columns = self.settings.forex.len().div_ceil(18).clamp(1, 3);
-        let rows = self.settings.forex.len().div_ceil(columns).max(1);
-        let grid_height = (height
-            - 166.0
-            - if self.market_error.is_some() {
-                20.0
-            } else {
-                0.0
-            })
-        .max(10.0);
-        let row_height =
-            ((grid_height - rows.saturating_sub(1) as f32) / rows as f32).clamp(0.8, 44.0);
-        let column_width = (width - 10.0 * (columns - 1) as f32) / columns as f32;
-        let mut quotes = widget::Row::new().spacing(10).height(grid_height);
+        let rows = frame.forex_rows.max(1);
+        let row_height = frame.forex_row_height;
+        let column_width = frame.forex_column_width;
+        let mut quotes = widget::Row::new().spacing(10);
         for group in self.settings.forex.chunks(rows) {
-            let mut list = widget::Column::new().width(Length::Fill);
+            let mut list = widget::Column::new().width(column_width);
             for (index, pair) in group.iter().enumerate() {
                 if index > 0 {
                     list = list.push(divider::horizontal::light());
@@ -1009,9 +1193,9 @@ impl FinanceDashboard {
             .push(
                 row![self.commodity_tile("BRN1"), self.commodity_tile("GOLD")]
                     .spacing(10)
-                    .height(78),
+                    .height(frame.commodity_height),
             );
-        view.height(Length::Fill).into()
+        view.into()
     }
 
     fn commodity_tile(&self, symbol: &'static str) -> Element<'_, Message> {
@@ -1191,6 +1375,296 @@ impl FinanceDashboard {
             container(text("Shows the public address seen by the service, including any VPN or configured proxy. Country and city come from IP geolocation.")).max_width(420), tooltip::Position::Bottom))
         .height(Length::Fill)
         .into()
+    }
+
+    fn vocabulary_view(&self, scale: f32) -> Element<'_, Message> {
+        if self.japanese_complete() {
+            return container(
+                text("This library is complete. Reset it in Settings to study it again.").size(15),
+            )
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+        }
+        let Some(entry) = self.japanese_entry() else {
+            return container(text::caption("No word is available."))
+                .align_y(Alignment::Center)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into();
+        };
+        let detail = self.japanese_detail(entry);
+        let pending = self.japanese_inflight.contains(&entry.id)
+            && !self.japanese_cache.contains_key(&entry.id);
+        let gloss = japanese::british::to_british(&entry.gloss);
+        use iced::advanced::text::Shaping;
+        let mut glyphs = row![
+            text(entry.word.clone())
+                .size(45.0 * scale)
+                .line_height(1.0)
+                .shaping(Shaping::Advanced)
+        ]
+        .spacing(14)
+        .align_y(Alignment::Center);
+        if japanese::ipa::kana_key(&entry.word) != japanese::ipa::kana_key(&entry.reading) {
+            glyphs = glyphs.push(text("|").size(22.0 * scale)).push(
+                text(entry.reading.clone())
+                    .size(45.0 * scale)
+                    .line_height(1.0)
+                    .shaping(Shaping::Advanced),
+            );
+        }
+        let english = row![
+            text(format!("/{}/", japanese::ipa::broaden(&detail.ipa)))
+                .size(16.0 * scale)
+                .shaping(Shaping::Advanced),
+            text(gloss).size(16.0 * scale).shaping(Shaping::Advanced),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+        let lines = column![glyphs, english]
+            .spacing(2)
+            .width(Length::Fill)
+            .align_x(Alignment::Center);
+        row![
+            tooltip(
+                container(lines)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Center)
+                    .align_y(Alignment::Center),
+                study_hover(&detail, pending),
+                tooltip::Position::Top,
+            ),
+            button::suggested("Next Word").on_press(Message::JapaneseNext),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .height(Length::Fill)
+        .width(Length::Fill)
+        .into()
+    }
+
+    fn japanese_detail(&self, entry: &catalog::Entry) -> japanese::details::Detail {
+        self.japanese_cache
+            .get(&entry.id)
+            .cloned()
+            .or_else(|| self.japanese_live.get(&entry.id).cloned())
+            .unwrap_or_else(|| japanese::details::Detail {
+                senses: Vec::new(),
+                examples: Vec::new(),
+                ipa: japanese::ipa::ipa_for(&entry.word, &entry.reading),
+                ipa_generated: true,
+                from_jisho: false,
+                from_wiktionary: false,
+            })
+    }
+
+    fn prefetch_japanese(&mut self) -> app::Task<Message> {
+        let wanted: Vec<String> = self
+            .japanese_cycles
+            .get(&self.japanese_library)
+            .map(|cycle| study::prefetch_ids(&cycle.deck))
+            .unwrap_or_default()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let mut tasks = Vec::new();
+        for id in wanted {
+            if self.japanese_cache.contains_key(&id)
+                || self.japanese_inflight.contains(&id)
+                || self.japanese_failed.contains(&id)
+            {
+                continue;
+            }
+            if self.japanese_inflight.len() >= 2 {
+                break;
+            }
+            let Some(entry) = catalog::catalog().entry(&id).cloned() else {
+                continue;
+            };
+            self.japanese_inflight.insert(id);
+            tasks.push(Task::perform(
+                async move {
+                    let lookup = japanese::details::lookup(&entry.word, &entry.reading).await;
+                    (entry.id, lookup)
+                },
+                |(id, lookup)| cosmic::Action::App(Message::JapaneseFetched(id, Box::new(lookup))),
+            ));
+        }
+        if tasks.is_empty() {
+            Task::none()
+        } else {
+            Task::batch(tasks)
+        }
+    }
+
+    fn japanese_entry(&self) -> Option<&catalog::Entry> {
+        let id = self
+            .japanese_cycles
+            .get(&self.japanese_library)?
+            .deck
+            .current
+            .as_deref()?;
+        catalog::catalog().entry(id)
+    }
+
+    fn japanese_complete(&self) -> bool {
+        let ids = catalog::catalog().ids(self.japanese_library);
+        self.japanese_cycles
+            .get(&self.japanese_library)
+            .is_some_and(|cycle| study::is_complete(&cycle.deck, ids))
+    }
+
+    fn japanese_counts(&self, library: Library) -> (usize, usize, f32) {
+        let total = catalog::catalog().ids(library).len();
+        let learned = self
+            .japanese_cycles
+            .get(&library)
+            .map(|cycle| cycle.deck.learned.len())
+            .unwrap_or(0)
+            .min(total);
+        let ratio = if total == 0 {
+            0.0
+        } else {
+            learned as f32 / total as f32
+        };
+        (learned, total, ratio)
+    }
+
+    fn japanese_library_row(&self, library: Library) -> Element<'_, Message> {
+        let (learned, total, ratio) = self.japanese_counts(library);
+        row![
+            widget::radio(
+                text(format!("{} \u{b7} {}", library.label(), library.jlpt())),
+                library,
+                Some(self.japanese_library),
+                Message::JapaneseLibrary,
+            ),
+            widget::space::horizontal(),
+            text::caption(format!(
+                "{} of {}",
+                grouped_count(learned),
+                grouped_count(total)
+            )),
+            container(japanese_progress(ratio)).width(Length::Fixed(148.0)),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .into()
+    }
+
+    fn load_japanese(&mut self) {
+        let today = Local::now().date_naive().num_days_from_ce();
+        let loaded = japanese::store::load();
+        let (library, mut cycles, load_error) = match loaded {
+            Ok(file) => (file.library(), file.decoded_cycles(), None),
+            Err(error) => (Library::Elementary, BTreeMap::new(), Some(error)),
+        };
+        let mut rng = rand::rng();
+        let mut changed = load_error.is_some();
+        for item in Library::ALL {
+            let ids = catalog::catalog().ids(item).to_vec();
+            let cycle = cycles.entry(item).or_default();
+            let before = cycle.deck.clone();
+            study::ensure(&mut cycle.deck, &ids, &mut rng);
+            changed |= cycle.deck != before;
+        }
+        let ids = catalog::catalog().ids(library).to_vec();
+        if let Some(cycle) = cycles.get_mut(&library) {
+            changed |= study::view_today(cycle, &ids, today, &mut rng);
+        }
+        self.japanese_library = library;
+        self.japanese_cycles = cycles;
+        if let Some(error) = load_error {
+            tracing::warn!("Japanese study progress was not loaded: {error}");
+        }
+        if changed {
+            self.persist_japanese();
+        }
+    }
+
+    fn seed_japanese(&mut self) {
+        let today = Local::now().date_naive().num_days_from_ce();
+        let mut rng = rand::rng();
+        self.japanese_library = Library::Elementary;
+        self.japanese_cycles.clear();
+        for item in Library::ALL {
+            let ids = catalog::catalog().ids(item).to_vec();
+            let mut cycle = Cycle::default();
+            study::ensure(&mut cycle.deck, &ids, &mut rng);
+            if item == self.japanese_library {
+                study::view_today(&mut cycle, &ids, today, &mut rng);
+            }
+            self.japanese_cycles.insert(item, cycle);
+        }
+    }
+
+    fn apply_japanese_day(&mut self, today: i32) -> bool {
+        let library = self.japanese_library;
+        let ids = catalog::catalog().ids(library).to_vec();
+        let mut rng = rand::rng();
+        let cycle = self.japanese_cycles.entry(library).or_default();
+        study::view_today(cycle, &ids, today, &mut rng)
+    }
+
+    fn advance_japanese_clock(&mut self) -> bool {
+        let today = Local::now().date_naive().num_days_from_ce();
+        let changed = self.apply_japanese_day(today);
+        let library = self.japanese_library;
+        let (before, after) = {
+            let cycle = self.japanese_cycles.entry(library).or_default();
+            let before = cycle.active_ms;
+            study::accrue(cycle, self.japanese_session_active);
+            (before, cycle.active_ms)
+        };
+        if changed || before / 30_000 != after / 30_000 {
+            self.persist_japanese();
+        }
+        changed
+    }
+
+    fn pass_japanese(&mut self) {
+        let library = self.japanese_library;
+        let ids = catalog::catalog().ids(library).to_vec();
+        let today = Local::now().date_naive().num_days_from_ce();
+        let mut rng = rand::rng();
+        let cycle = self.japanese_cycles.entry(library).or_default();
+        study::pass_today(cycle, &ids, today, &mut rng);
+        self.persist_japanese();
+    }
+
+    fn choose_japanese_library(&mut self, library: Library) {
+        if library == self.japanese_library {
+            return;
+        }
+        self.japanese_library = library;
+        self.japanese_confirm_reset = false;
+        let today = Local::now().date_naive().num_days_from_ce();
+        self.apply_japanese_day(today);
+        self.persist_japanese();
+    }
+
+    fn reset_japanese_library(&mut self) {
+        let library = self.japanese_library;
+        let ids = catalog::catalog().ids(library).to_vec();
+        let today = Local::now().date_naive().num_days_from_ce();
+        let mut rng = rand::rng();
+        let cycle = self.japanese_cycles.entry(library).or_default();
+        study::reset_today(cycle, &ids, today, &mut rng);
+        self.japanese_confirm_reset = false;
+        self.persist_japanese();
+    }
+
+    fn persist_japanese(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        let file =
+            japanese::store::StudyFile::from_cycles(self.japanese_library, &self.japanese_cycles);
+        if let Err(error) = japanese::store::save(&file) {
+            tracing::warn!("Japanese study progress was not saved: {error}");
+        }
     }
 
     fn settings_view(&self) -> Element<'_, Message> {
@@ -1374,6 +1848,30 @@ impl FinanceDashboard {
         view = view.push(text::caption("Subscribe to country holiday calendars in Google Calendar → Settings → Add calendar → Browse calendars of interest. Each appears here after the next refresh."));
         view = view
             .push(divider::horizontal::default())
+            .push(text::title4("Japanese vocabulary"));
+        view = view.push(text::caption("One library is active. Its word stays until the next local day, including across restarts. Thirty minutes of active computer use marks that word learned when the day changes. Next marks it learned immediately. Idle, locked, and inactive sessions do not count. A library you are not viewing keeps its word until you select it."));
+        for library in Library::ALL {
+            view = view.push(self.japanese_library_row(library));
+        }
+        if self.japanese_confirm_reset {
+            view = view.push(text::body(format!(
+                "Learned words in {} will be shown again. The other libraries keep their progress.",
+                self.japanese_library.label()
+            )));
+            view = view.push(
+                row![
+                    button::standard("Cancel").on_press(Message::JapaneseCancelReset),
+                    button::destructive("Reset").on_press(Message::JapaneseConfirmReset),
+                ]
+                .spacing(8),
+            );
+        } else {
+            view = view.push(
+                button::destructive("Reset this library").on_press(Message::JapaneseAskReset),
+            );
+        }
+        view = view
+            .push(divider::horizontal::default())
             .push(text::title4("Panel & refresh"));
         view = view.push(text::caption("The panel label follows COSMIC Date, Time & Calendar settings and the OS clock. The two-week calendar follows COSMIC’s first day of week. Click the panel clock to open or close the dashboard. Click outside or press Escape to dismiss it. The dashboard opens automatically once per login, after the panel is ready. Public time syncs hourly; Google Calendar and markets refresh every 10 minutes; public IP every minute."));
         view.push(text::caption(format!(
@@ -1450,8 +1948,24 @@ impl cosmic::Application for FinanceDashboard {
             auth_busy: false,
             choosing_client: false,
             notice: None,
+            japanese_library: Library::Elementary,
+            japanese_cycles: BTreeMap::new(),
+            japanese_session_active: true,
+            japanese_probing: false,
+            japanese_idle_warned: false,
+            japanese_confirm_reset: false,
+            japanese_cache: BTreeMap::new(),
+            japanese_live: BTreeMap::new(),
+            japanese_inflight: BTreeSet::new(),
+            japanese_failed: BTreeSet::new(),
         };
-        let tasks = app.refresh_due();
+        if cfg!(test) {
+            app.seed_japanese();
+        } else {
+            app.japanese_cache = japanese::store::load_cache();
+            app.load_japanese();
+        }
+        let tasks = Task::batch([app.refresh_due(), app.prefetch_japanese()]);
         (app, tasks)
     }
 
@@ -1466,6 +1980,7 @@ impl cosmic::Application for FinanceDashboard {
     fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
             iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick),
+            iced::time::every(Duration::from_secs(5)).map(|_| Message::JapaneseProbe),
             rectangle_tracker_subscription(0).map(|event| Message::Rectangle(event.1)),
             iced::event::listen_with(input_event),
         ])
@@ -1482,6 +1997,7 @@ impl cosmic::Application for FinanceDashboard {
         }
         match message {
             Message::Tick => {
+                let word_changed = self.advance_japanese_clock();
                 self.panel_now = jiff::Zoned::now();
                 let today = Local::now().date_naive();
                 if self.os_sample.elapsed() >= Duration::from_secs(30) {
@@ -1510,19 +2026,28 @@ impl cosmic::Application for FinanceDashboard {
                     self.selected_day = today;
                     self.invalidate_calendar();
                 }
-                return Task::batch([self.open_login_popup_if_ready(), self.refresh_due()]);
+                let mut tasks = vec![self.open_login_popup_if_ready(), self.refresh_due()];
+                if word_changed {
+                    tasks.push(self.prefetch_japanese());
+                }
+                return Task::batch(tasks);
             }
             Message::SurfacePressed(id) => {
                 if self.backdrop == Some(id) {
                     return self.close_popup();
                 }
             }
-            Message::Output(output, name) => {
-                self.outputs.retain(|(old, _)| *old != output);
-                self.outputs.push((output, name));
+            Message::Output(output, name, width, height) => {
+                self.outputs.retain(|known| known.output != output);
+                self.outputs.push(KnownOutput {
+                    output,
+                    name,
+                    width,
+                    height,
+                });
             }
             Message::OutputRemoved(output) => {
-                self.outputs.retain(|(old, _)| *old != output);
+                self.outputs.retain(|known| known.output != output);
                 return self.close_popup();
             }
             Message::TogglePopup => {
@@ -1866,13 +2391,71 @@ impl cosmic::Application for FinanceDashboard {
             Message::Opened(Err(error)) => self.notice = Some(error),
             Message::Opened(Ok(())) => {}
             Message::ClearNotice => self.notice = None,
+            Message::JapaneseNext => {
+                self.pass_japanese();
+                return self.prefetch_japanese();
+            }
+            Message::JapaneseLibrary(library) => {
+                self.choose_japanese_library(library);
+                return self.prefetch_japanese();
+            }
+            Message::JapaneseAskReset => self.japanese_confirm_reset = true,
+            Message::JapaneseCancelReset => self.japanese_confirm_reset = false,
+            Message::JapaneseConfirmReset => {
+                self.reset_japanese_library();
+                return self.prefetch_japanese();
+            }
+            Message::JapaneseProbe => {
+                if self.japanese_probing {
+                    return Task::none();
+                }
+                self.japanese_probing = true;
+                return Task::perform(japanese::session::probe(), |result| {
+                    cosmic::Action::App(Message::JapaneseSession(result))
+                });
+            }
+            Message::JapaneseSession(result) => {
+                self.japanese_probing = false;
+                match result {
+                    Ok(active) => {
+                        self.japanese_session_active = active;
+                        self.japanese_idle_warned = false;
+                    }
+                    Err(error) => {
+                        self.japanese_session_active = true;
+                        if !self.japanese_idle_warned {
+                            tracing::warn!("Japanese study idle detection is unavailable: {error}");
+                        }
+                        self.japanese_idle_warned = true;
+                    }
+                }
+            }
+            Message::JapaneseFetched(id, lookup) => {
+                self.japanese_inflight.remove(&id);
+                if lookup.cache {
+                    self.japanese_cache.insert(id, lookup.detail);
+                    if !cfg!(test)
+                        && let Err(error) = japanese::store::save_cache(&self.japanese_cache)
+                    {
+                        tracing::warn!("Japanese dictionary cache was not saved: {error}");
+                    }
+                } else {
+                    self.japanese_failed.insert(id.clone());
+                    self.japanese_live.insert(id, lookup.detail);
+                }
+                return self.prefetch_japanese();
+            }
         }
         Task::none()
     }
 
     fn view(&self) -> Element<'_, Message> {
         if self.preview {
-            return self.dashboard();
+            let screen = self.usable_screen();
+            return widget::autosize::autosize(self.dashboard(), PREVIEW_AUTOSIZE.clone())
+                .max_width(screen.width)
+                .max_height(screen.height)
+                .into();
         }
         let horizontal = self.core.applet.is_horizontal();
         let label: Element<_> = if horizontal {
@@ -1939,16 +2522,16 @@ impl cosmic::Application for FinanceDashboard {
                 .height(Length::Fill)
                 .into();
         }
-        let content = self.dashboard();
+        let screen = self.usable_screen();
         self.core
             .applet
-            .popup_container(container(content).width(WIDTH).height(HEIGHT))
+            .popup_container(self.dashboard())
             .limits(
                 Limits::NONE
-                    .min_width(480.0)
-                    .max_width(WIDTH)
-                    .min_height(300.0)
-                    .max_height(HEIGHT),
+                    .min_width(360.0)
+                    .max_width(screen.width)
+                    .min_height(240.0)
+                    .max_height(screen.height),
             )
             .into()
     }
@@ -2068,6 +2651,132 @@ fn parse_color(hex: &str) -> Color {
         return Color::from_rgb8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8);
     }
     Color::from_rgb8(122, 162, 247)
+}
+
+fn study_hover(detail: &japanese::details::Detail, pending: bool) -> Element<'static, Message> {
+    use iced::advanced::text::Shaping;
+    let pronunciation = if detail.ipa_generated {
+        "Generated from kana"
+    } else {
+        "Wiktionary"
+    };
+    let mut senses = column![].spacing(8);
+    if detail.senses.is_empty() {
+        senses = senses.push(text("No further senses.").size(14));
+    } else {
+        for sense in &detail.senses {
+            let pos = if sense.pos.trim().is_empty() {
+                "Sense".to_owned()
+            } else {
+                sense.pos.clone()
+            };
+            senses = senses.push(
+                column![
+                    text::caption(pos),
+                    text(sense.gloss.clone())
+                        .size(14)
+                        .shaping(Shaping::Advanced),
+                ]
+                .spacing(2),
+            );
+        }
+    }
+    let mut examples = column![].spacing(8);
+    if detail.examples.is_empty() {
+        let note = if pending {
+            "Looking up Jisho and Wiktionary."
+        } else {
+            "Examples unavailable."
+        };
+        examples = examples.push(text(note).size(14));
+    } else {
+        for (index, example) in detail.examples.iter().enumerate() {
+            examples = examples.push(
+                column![
+                    text(format!("{}. {}", index + 1, example.japanese))
+                        .size(14)
+                        .shaping(Shaping::Advanced),
+                    text::caption(example.english.clone()),
+                ]
+                .spacing(2),
+            );
+        }
+    }
+    container(
+        column![
+            text("Pronunciation").size(15),
+            text(format!("/{}/", japanese::ipa::broaden(&detail.ipa)))
+                .size(18)
+                .shaping(Shaping::Advanced),
+            text::caption(pronunciation),
+            text("Senses").size(15),
+            senses,
+            text("Examples").size(15),
+            examples,
+            text::caption(dictionary_source(detail)),
+        ]
+        .spacing(8),
+    )
+    .max_width(420)
+    .padding(12)
+    .into()
+}
+
+#[cfg(test)]
+fn gloss_beyond(primary: &str, gloss: &str) -> String {
+    let primary_key = primary.trim().to_ascii_lowercase();
+    if !gloss.contains(';') {
+        return if gloss.trim().to_ascii_lowercase() == primary_key {
+            String::new()
+        } else {
+            gloss.trim().to_owned()
+        };
+    }
+    gloss
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty() && part.to_ascii_lowercase() != primary_key)
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn dictionary_source(detail: &japanese::details::Detail) -> String {
+    match (detail.from_jisho, detail.from_wiktionary) {
+        (true, true) => "Jisho senses. Wiktionary examples and pronunciation.".to_owned(),
+        (true, false) => "Jisho. Wiktionary examples are unavailable.".to_owned(),
+        (false, true) => "Wiktionary. Jisho is unavailable.".to_owned(),
+        (false, false) => "Local gloss. Jisho and Wiktionary are unavailable.".to_owned(),
+    }
+}
+
+fn grouped_count(value: usize) -> String {
+    let raw = value.to_string();
+    let mut reversed = String::new();
+    for (index, character) in raw.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            reversed.push(',');
+        }
+        reversed.push(character);
+    }
+    reversed.chars().rev().collect()
+}
+
+fn japanese_progress(ratio: f32) -> Element<'static, Message> {
+    use cosmic::Theme;
+    use cosmic::iced::widget::progress_bar;
+    progress_bar(0.0..=1.0, ratio)
+        .girth(6)
+        .class(cosmic::theme::ProgressBar::custom(|theme: &Theme| {
+            progress_bar::Style {
+                background: Color::from(theme.cosmic().bg_component_divider()).into(),
+                bar: Color::from(theme.cosmic().accent_color()).into(),
+                border: Border {
+                    radius: 3.0.into(),
+                    ..Default::default()
+                },
+            }
+        }))
+        .into()
 }
 
 #[cfg(test)]
@@ -2357,5 +3066,101 @@ mod tests {
             );
             assert!(matches!(message, Some(Message::SurfacePressed(window)) if window == id));
         }
+    }
+
+    #[test]
+    fn a_short_day_replaces_only_the_viewed_library() {
+        let mut app = test_app();
+        let elementary = Library::Elementary;
+        let junior = Library::JuniorHigh;
+        let elementary_word = app.japanese_cycles[&elementary]
+            .deck
+            .current
+            .clone()
+            .unwrap();
+        let junior_word = app.japanese_cycles[&junior].deck.current.clone().unwrap();
+        app.japanese_cycles.get_mut(&elementary).unwrap().active_ms = 60_000;
+        app.japanese_cycles.get_mut(&elementary).unwrap().issued_day = Some(10);
+        app.japanese_cycles.get_mut(&junior).unwrap().issued_day = Some(10);
+        app.japanese_cycles.get_mut(&junior).unwrap().active_ms = study::LEARN_LIMIT_MS;
+        assert!(app.apply_japanese_day(20));
+        let elementary_cycle = &app.japanese_cycles[&elementary];
+        assert_ne!(
+            elementary_cycle.deck.current.as_deref(),
+            Some(elementary_word.as_str())
+        );
+        assert!(!elementary_cycle.deck.learned.contains(&elementary_word));
+        assert_eq!(elementary_cycle.active_ms, 0);
+        assert_eq!(
+            app.japanese_cycles[&junior].deck.current.as_deref(),
+            Some(junior_word.as_str())
+        );
+        assert!(app.japanese_cycles[&junior].deck.learned.is_empty());
+    }
+
+    #[test]
+    fn next_learns_the_viewed_word_and_refresh_does_not() {
+        let mut app = test_app();
+        let library = app.japanese_library;
+        let word = app.japanese_cycles[&library].deck.current.clone().unwrap();
+        let other = Library::ALL
+            .into_iter()
+            .find(|item| *item != library)
+            .unwrap();
+        let other_word = app.japanese_cycles[&other].deck.current.clone();
+        _ = app.update(Message::Refresh);
+        assert_eq!(
+            app.japanese_cycles[&library].deck.current.as_deref(),
+            Some(word.as_str())
+        );
+        _ = app.update(Message::JapaneseNext);
+        assert!(app.japanese_cycles[&library].deck.learned.contains(&word));
+        assert_ne!(
+            app.japanese_cycles[&library].deck.current.as_deref(),
+            Some(word.as_str())
+        );
+        assert_eq!(app.japanese_cycles[&other].deck.current, other_word);
+        app.japanese_cycles.get_mut(&library).unwrap().active_ms = study::LEARN_LIMIT_MS;
+        let learned = app.japanese_cycles[&library].deck.current.clone().unwrap();
+        let issued = app.japanese_cycles[&library].issued_day.unwrap();
+        assert!(app.apply_japanese_day(issued + 1));
+        assert!(
+            app.japanese_cycles[&library]
+                .deck
+                .learned
+                .contains(&learned)
+        );
+    }
+
+    #[test]
+    fn reset_clears_only_the_selected_library() {
+        let mut app = test_app();
+        let library = app.japanese_library;
+        let other = Library::JuniorHigh;
+        app.japanese_cycles
+            .get_mut(&library)
+            .unwrap()
+            .deck
+            .learned
+            .insert("keep-me".into());
+        app.japanese_cycles
+            .get_mut(&other)
+            .unwrap()
+            .deck
+            .learned
+            .insert("keep-me".into());
+        app.japanese_confirm_reset = true;
+        _ = app.update(Message::JapaneseConfirmReset);
+        assert!(!app.japanese_confirm_reset);
+        assert!(app.japanese_cycles[&library].deck.learned.is_empty());
+        assert!(app.japanese_cycles[&other].deck.learned.contains("keep-me"));
+        assert!(app.japanese_cycles[&library].deck.current.is_some());
+    }
+
+    #[test]
+    fn further_senses_omit_the_primary_gloss() {
+        assert_eq!(gloss_beyond("cat", "cat"), "");
+        assert_eq!(gloss_beyond("cat", "cat; kitten"), "kitten");
+        assert_eq!(gloss_beyond("cat", "domestic cat"), "domestic cat");
     }
 }

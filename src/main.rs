@@ -82,7 +82,7 @@ fn main() -> anyhow::Result<()> {
     if preview {
         cosmic::app::run::<app::FinanceDashboard>(
             cosmic::app::Settings::default()
-                .size(cosmic::iced::Size::new(app::WIDTH, app::HEIGHT))
+                .size(cosmic::iced::Size::new(1280.0, 800.0))
                 .transparent(false),
             (settings, true),
         )?;

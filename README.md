@@ -2,7 +2,7 @@
 
 A local, native Rust/libcosmic dashboard for a trader’s working day. Its panel label follows the installed COSMIC **Date, Time & Calendar** applet’s locale, 12/24-hour preference, date, weekday, seconds, custom format, size and orientation.
 
-The dashboard is a wide **1600×940** popup designed for this computer’s 1920×1080 display. World clocks sit across the upper left, with a prominent public IP address and large country flag on the upper right. The two-week calendar occupies the lower left; forex and both commodity prices occupy the lower right. All default data is visible together without dashboard scrolling. Additional clocks, currency pairs and calendar events automatically become more compact to fit; large watchlists also use multiple columns. Full event details and source/timing information remain available on hover.
+The dashboard sizes itself to the clocks, currency pairs, and calendar events. World clocks sit across the upper left. The public IP card is on the upper right, and its right edge lines up with forex and commodities. The two-week calendar is lower left. Each day box is at least three times the previous date-only height. The Japanese card sits under the calendar, and its bottom lines up with the commodities card. Forex and commodities occupy the lower right. Fewer items make the window smaller. Added clocks, pairs, and events make it larger at the current type size, until it reaches the monitor measured when the applet starts. Past that size the items shrink so everything stays visible without scrolling. A second clock row or forex column is used only when another row would pass the monitor. Settings opens in that same window and scrolls inside it. Full event details and source/timing information remain available on hover.
 
 A centered, text-only banner tops the dashboard. Its initial message is
 **“Thrived Today, Leading Tomorrow”**; your saved message takes precedence.
@@ -16,14 +16,14 @@ COSMIC outlines.
 - At each login, the dashboard automatically opens once the panel is ready. Panel/applet restarts during that login do not reopen it automatically.
 - The dashboard stays open when the pointer or keyboard focus moves away, including with COSMIC’s focus-follows-cursor enabled. Click the clock again or outside the dashboard to dismiss it. Escape dismisses it when the applet has keyboard focus. The dashboard has no × close button.
 - The first click in the surrounding desktop/work area only dismisses the dashboard; it does not also activate the window underneath. Click again to interact with that window. This also applies to the automatic login dashboard.
-- **Settings** configures the banner, clocks, forex pairs and Google Calendar. Changes to watchlists are saved immediately.
+- **Settings** configures the banner, clocks, forex pairs, Japanese vocabulary and Google Calendar. Changes to watchlists and the vocabulary library are saved immediately.
 - Under **Settings → Dashboard banner**, edit the message and choose **Save** (or Enter) to apply it; **Cancel** restores the saved message. Use 1–160 characters on one line. Longer messages shrink to fit, then use an ellipsis if necessary; hover shows the complete text. Drafts survive navigation and validation/write failures.
 - Under **Settings → World clocks**, click **Edit** beside an existing clock to change its name or IANA time zone. **Save** (or Enter) validates and saves the changes in the same position; **Cancel** discards the draft. Finish the current edit before editing or removing another clock.
 - Hover over calendar events for details; click to open their Google Calendar page.
 - Select a day for its complete agenda below the two-week grid. Busy days automatically use smaller event labels rather than hiding additional events.
 - Hover over a market price for the instrument, delay, retrieval time and last available one-minute bar.
 - Each currency pair uses two tightly overlapping rectangular flags, positioned together so they cannot wrap toward the adjacent row. The embedded artwork requires no runtime downloads or emoji font; unknown country codes use a neutral dash badge.
-- The refresh button updates all modules immediately; background refresh runs even while the popup is closed.
+- The refresh button updates clocks, the calendar, markets, and the public IP immediately. It does not change the Japanese word. Background refresh of those data modules runs even while the popup is closed.
 
 ## Build and install
 
@@ -90,6 +90,11 @@ Events from all visible, enabled calendars are fetched, including recurring inst
 | BRN1 | `ICEEUR:BRN1!`, nearest continuous ICE Brent crude futures, USD/barrel | Startup and every 10 minutes |
 | GOLD | `TVC:GOLD`, spot gold / XAUUSD, USD/troy ounce | Startup and every 10 minutes |
 | Public IP | Public egress address, country flag, country and city | Startup and every minute |
+| Japanese | Headword, reading, pronunciation, British gloss, senses, and examples | One new word on the next local day |
+
+The Japanese card under the calendar has two centered lines. The first line is the headword and the reading at 45px. The second line is the broad Tokyo IPA pronunciation and the British English gloss. **Next Word** stays at the right. Hovering the lines opens the pronunciation source, each sense under its part of speech, each example with the Japanese sentence above the English, and the dictionary source. There is no JLPT label, countdown, or separate Settings button. At the next local midnight, or on the next launch after one or more missed midnights, the active library takes one step. The step marks the word learned only after 30 minutes of active session time; otherwise the word is replaced and stays unlearned. Active time pauses while logind reports the session idle, locked, or inactive. Libraries that are not selected keep their current word until you select them. Dashboard **Refresh** does not change the word. Library choice and reset are in Settings. Reset asks for confirmation and clears only the selected library. Progress starts empty in this applet and is not read from Japanese Words.
+
+Senses come from Jisho, with Wiktionary as the backup. Example sentences and dictionary pronunciation come from English Wiktionary. Pronunciation is shown as broad Tokyo IPA: long vowels and small-tsu consonants use ː, and the voiced velar stop is ɡ. Pitch accent and narrow vowel marks are removed. If neither source has pronunciation, it is generated from the kana and labeled. Missing examples stay blank.
 
 World clocks use [TimeAPI.io](https://timeapi.io/) with [WorldTimeAPI](https://worldtimeapi.org/) as fallback. The midpoint of each HTTPS request estimates the offset. This is an application-level correction: the OS clock is never changed, and the panel always uses uncorrected OS time. On sync failure the analog clocks fall back to OS time with a visible status. A detected system-clock jump invalidates the old offset and triggers another sync. The analog faces have only hour and minute hands; AM/PM and the local date distinguish days and half-days.
 
@@ -105,7 +110,7 @@ The supplied TradingView image contains eleven forex rows. Each has two currency
 
 ## Configuration and development
 
-Preferences: `$XDG_CONFIG_HOME/cosmic-applet-finance-dashboard/settings.json` (normally `~/.config/cosmic-applet-finance-dashboard/settings.json`). These include `banner_message`, saved clocks/watchlists, and Google configuration. Older settings without a banner gain the initial message while retaining their existing preferences. A previous `~/.config/daily-work-cosmic-applet` directory is adopted on startup, and a stored Google token from either previous application id is moved to `io.github.joeytong.cosmic-applet-finance-dashboard`. Writes are atomic and private. Invalid configuration is reported without overwriting the file. Backups from panel edits are in `panel-backups/` under the same directory.
+Preferences: `$XDG_CONFIG_HOME/cosmic-applet-finance-dashboard/settings.json` (normally `~/.config/cosmic-applet-finance-dashboard/settings.json`). These include `banner_message`, saved clocks/watchlists, and Google configuration. Japanese progress is separate, in `$XDG_DATA_HOME/cosmic-applet-finance-dashboard/japanese-study.json` (normally `~/.local/share/cosmic-applet-finance-dashboard/japanese-study.json`). Dictionary details for the current word and the next 10 queued words are cached beside it in `japanese-details.json`. Older settings without a banner gain the initial message while retaining their existing preferences. A previous `~/.config/daily-work-cosmic-applet` directory is adopted on startup, and a stored Google token from either previous application id is moved to `io.github.joeytong.cosmic-applet-finance-dashboard`. Writes are atomic and private. Invalid configuration is reported without overwriting the file. Backups from panel edits are in `panel-backups/` under the same directory.
 
 ```sh
 cargo fmt --all -- --check
@@ -114,7 +119,7 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo run -- --diagnose
 ```
 
-The tests cover calendar DST boundaries, exclusive all-day endings, zero-duration events, week/year rollover, financial response parsing, CNH/CNY identity, OAuth callback/client validation, click toggling and same-surface Settings, ignored pointer/focus changes, outside-click layer cleanup, stale surface events, external-window handoff, banner validation/drafts/legacy settings, flag coverage/fallbacks, and clock-edit validation/cancellation/order preservation. Once-per-login tests cover layout readiness, preview isolation, restarts and concurrent panel instances using temporary session markers. Verify actual panel clicks, anchoring and the next login on the desktop. Browser launches remove the panel-only inherited Wayland socket. Live Google integration requires your credentials and browser consent; the diagnostics command checks only public services.
+The tests cover calendar DST boundaries, exclusive all-day endings, zero-duration events, week/year rollover, financial response parsing, CNH/CNY identity, OAuth callback/client validation, click toggling and same-surface Settings, ignored pointer/focus changes, outside-click layer cleanup, stale surface events, external-window handoff, banner validation/drafts/legacy settings, flag coverage/fallbacks, clock-edit validation/cancellation/order preservation, and the Japanese daily word. Once-per-login tests cover layout readiness, preview isolation, restarts and concurrent panel instances using temporary session markers. Verify actual panel clicks, anchoring and the next login on the desktop. Browser launches remove the panel-only inherited Wayland socket. Live Google integration requires your credentials and browser consent; the diagnostics command checks only public services.
 
 Main files:
 
@@ -124,6 +129,7 @@ Main files:
 - `src/market.rs`, `src/network.rs`: public data providers and time/IP checks
 - `src/config.rs`, `src/login.rs`: preferences and once-per-login opening
 - `src/flags.rs`, `data/flags/`: embedded flag rendering, artwork and license
+- `src/japanese/`, `data/japanese/`: daily vocabulary, bundled lists and study progress
 
 To remove the panel entry without uninstalling, run `python3 scripts/panel.py --remove`. To uninstall, disconnect Google in Settings first, then run `sh scripts/uninstall.sh`. Preferences and panel backups are retained.
 
@@ -144,4 +150,4 @@ session export/import commands as well as transferring the project files.
 
 ## License
 
-GPL-3.0-only. COSMIC panel date/time formatting and defaults are adapted from System76’s `cosmic-applet-time` / `cosmic-applets-config` 1.11 (Copyright 2023 System76, GPL-3.0-only). Bundled flag-icons artwork is MIT-licensed; see `data/flags/LICENSE` and `data/flags/README.md`. Native widget/runtime dependencies retain their respective licenses. See `LICENSE` and `THIRD_PARTY.md`.
+GPL-3.0-only. COSMIC panel date/time formatting and defaults are adapted from System76’s `cosmic-applet-time` / `cosmic-applets-config` 1.11 (Copyright 2023 System76, GPL-3.0-only). Bundled flag-icons artwork is MIT-licensed; see `data/flags/LICENSE` and `data/flags/README.md`. The Japanese queue, catalog, spelling and idle-detection sources keep their MPL-2.0 headers. `data/japanese/words.json` stays CC BY-SA 4.0; see `data/japanese/WORDS.md`. Native widget/runtime dependencies retain their respective licenses. See `LICENSE` and `THIRD_PARTY.md`.
